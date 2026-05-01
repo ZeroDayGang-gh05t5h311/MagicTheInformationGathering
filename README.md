@@ -1,2 +1,2 @@
 # MagicTheInformationGathering
-I place to share infomation gathering tools.
+A place to share infomation gathering tools.
