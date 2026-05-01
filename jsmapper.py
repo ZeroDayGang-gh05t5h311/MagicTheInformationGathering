@@ -446,4 +446,3 @@ if __name__ == "__main__":
         print("[!] Interrupted")
     except Exception as e:
         print(f"[!] Fatal error: {e}")
-        "information"
