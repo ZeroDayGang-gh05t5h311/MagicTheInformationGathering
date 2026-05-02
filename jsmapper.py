@@ -17,6 +17,8 @@ Scan multiple targets from a file, save results, and enable stealth mode
 python3 jsmapper.py -l targets.txt --output results.json --stealth
 Increase concurrency and enable HTML saving
 python3 jsmapper.py -u https://example.com -t 20 --save-html
+
+Should go without writing; but always be sure to only use this on systems you own or have permission to test on.
 """
 import asyncio, aiohttp, re, argparse, json, logging
 from bs4 import BeautifulSoup
