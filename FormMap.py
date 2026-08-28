@@ -1,7 +1,19 @@
 #!/usr/bin/python3
 """
+FormMap - Lightweight HTML structure and form auditing tool.
+Static analysis only:
+- Retrieves HTML pages
+- Maps internal links
+- Inspects forms
+- Generates JSON reports
+- Stores optional local artifacts
+
+No JavaScript execution.
+No form submission.
+No active exploitation.
+
 FormMap — Embedded Documentation:
-'FormMap' is a lightweight multi threaded website auditing tool designed to inspect the structure of one or more web pages and generate reports about internal links, HTML forms, and potentially problematic form implementations. The tool combines `requests` for reliable HTTP retrieval, `BeautifulSoup` for HTML parsing, and a thread pool for concurrent processing of multiple target URLs.
+'FormMap' is a lightweight multithreaded website auditing tool designed to inspect the structure of one or more web pages and generate reports about internal links, HTML forms, and potentially problematic form implementations. The tool combines `requests` for reliable HTTP retrieval, `BeautifulSoup` for HTML parsing, and a thread pool for concurrent processing of multiple target URLs.
 The primary goal is to provide a quick structural audit of websites without requiring a full crawler or browser automation framework. For each supplied URL, the auditor downloads the page, extracts internal links, inventories all forms and their input fields, and flags forms that appear incomplete or suspicious.
 Key Features:
 Concurrent Scanning:
@@ -19,7 +31,7 @@ Every HTML form discovered on a page is analyzed and recorded, including:
 * Missing inputs
 * Anonymous or suspicious input fields
 Optional Artifact Storage:
-By default, the tool creates an `audit_output/` directory and stores(be careful of overwrites):
+By default, the tool creates an `audit_output/` directory and stores:
 * Raw page HTML (`index.html`)
 * Internal link maps (`link_map.json`)
 * Individual form definitions (`form_*.json`)
@@ -133,21 +145,10 @@ Broken forms: 1
   Form 1: https://example.com/login (post) [2 inputs]
   Form 2: https://example.com/search (get) [1 inputs]
   Form 3:  (post) [0 inputs]
-
+  
 The tool is intentionally lightweight and focuses on static HTML analysis rather than browser automation. It does not execute JavaScript, follow discovered links recursively, submit forms, or perform security testing. Instead, it provides a fast first-pass assessment of site structure and form quality that can be incorporated into larger auditing, QA, scraping, or monitoring workflows.
 Because sessions are stored in thread-local storage, each worker maintains its own connection pool while avoiding shared-session thread safety concerns. This design improves scalability while keeping implementation complexity low.
 
-FormMap - Lightweight HTML structure and form auditing tool.
-Static analysis only:
-- Retrieves HTML pages
-- Maps internal links
-- Inspects forms
-- Generates JSON reports
-- Stores optional local artifacts
-
-No JavaScript execution.
-No form submission.
-No active exploitation.
 """
 import argparse
 import json
@@ -163,35 +164,28 @@ import requests
 from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-
 logging.basicConfig(level=logging.INFO,format="%(asctime)s [%(levelname)s] %(message)s")
 logger=logging.getLogger("FormMap")
-
 MAX_RESPONSE_SIZE=10*1024*1024
 MAX_THREADS=50
-
 @dataclass(slots=True)
 class FormInfo:
     action:str
     method:str
     inputs:list[dict]=field(default_factory=list)
-
 @dataclass(slots=True)
 class BrokenFormReport:
     missing_action:bool=False
     missing_inputs:bool=False
     suspicious_fields:list[str]=field(default_factory=list)
-
 @dataclass(slots=True)
 class PageReport:
     url:str
     forms:list[FormInfo]=field(default_factory=list)
     links:list[str]=field(default_factory=list)
     broken_forms:list[BrokenFormReport]=field(default_factory=list)
-
 def safe_filename(value:str)->str:
     return "".join(c if c.isalnum() or c in "._-" else "_" for c in value)
-
 def normalize_url(url:str):
     if not url:
         return None
@@ -209,11 +203,9 @@ def normalize_url(url:str):
         return url
     except Exception:
         return None
-
 def domain_name(url:str)->str:
     parsed=urlparse(url)
     return safe_filename(parsed.hostname or "unknown")
-
 def atomic_write(path:Path,data:str):
     try:
         path.parent.mkdir(parents=True,exist_ok=True)
@@ -484,4 +476,3 @@ if __name__=="__main__":
         logger.info(
             "Interrupted by user"
         )
-d
