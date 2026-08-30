@@ -1,77 +1,159 @@
 #!/usr/bin/python3
 """
 FormMap - Lightweight HTML structure and form auditing tool.
-Static analysis only:
+Static HTML analysis only:
 - Retrieves HTML pages
 - Maps internal links
-- Inspects forms
+- Optionally follows internal links with bounded crawling
+- Inspects HTML forms
+- Detects suspicious form structures
 - Generates JSON reports
 - Stores optional local artifacts
+- Provides structured error reporting
 
 No JavaScript execution.
+No browser automation.
 No form submission.
 No active exploitation.
 
 FormMap — Embedded Documentation:
-'FormMap' is a lightweight multithreaded website auditing tool designed to inspect the structure of one or more web pages and generate reports about internal links, HTML forms, and potentially problematic form implementations. The tool combines `requests` for reliable HTTP retrieval, `BeautifulSoup` for HTML parsing, and a thread pool for concurrent processing of multiple target URLs.
-The primary goal is to provide a quick structural audit of websites without requiring a full crawler or browser automation framework. For each supplied URL, the auditor downloads the page, extracts internal links, inventories all forms and their input fields, and flags forms that appear incomplete or suspicious.
-Key Features:
-Concurrent Scanning:
-Multiple websites can be analyzed simultaneously using a `ThreadPoolExecutor`. The maximum number of worker threads is configurable via the `--threads` command-line argument.
-Automatic Retry Handling
-Each worker thread maintains its own `requests.Session` instance. Sessions are configured with automatic retries for transient server-side failures (HTTP 500, 502, 503, and 504 responses), helping reduce failures caused by temporary network or infrastructure issues.
-Internal Link Discovery:
-The auditor collects all anchor (`<a>`) elements containing `href` attributes and resolves them to absolute URLs. Only links belonging to the same domain as the scanned page are included in the report.
-Form Analysis:
-Every HTML form discovered on a page is analyzed and recorded, including:
-* Form action URL
-* Submission method (GET/POST/etc.)
-* Input field metadata
-* Missing actions
-* Missing inputs
-* Anonymous or suspicious input fields
-Optional Artifact Storage:
-By default, the tool creates an `audit_output/` directory and stores:
-* Raw page HTML (`index.html`)
-* Internal link maps (`link_map.json`)
-* Individual form definitions (`form_*.json`)
-This behavior can be disabled using the `--no-save-html` flag.
-Flexible Reporting
-Results can be displayed directly in the terminal or exported as structured JSON suitable for further processing, integration, or automation.
 
-1. URL Collection
-URLs may be supplied directly via:
---urls https://example.com,https://example.org
-or loaded from a text file:
---file sites.txt
-Each line in the file should contain a single URL.
-2. Page Retrieval
-For every target URL:
-1. A thread-local HTTP session is obtained.
-2. The page is downloaded using a configurable timeout.
-3. HTTP errors automatically raise exceptions.
-4. Retrieved HTML may be saved locally.
-If a URL does not include a scheme (`http://` or `https://`), HTTPS is automatically assumed.
+FormMap is a lightweight multithreaded website structure auditing tool designed to inspect HTML pages, discover internal links, inventory forms, and generate structured reports about website organization and form implementation quality.
+
+The tool is intentionally designed as a passive static analyzer. It retrieves HTML content, parses the document structure, extracts useful metadata, and records potential structural problems without interacting with forms or executing client-side code.
+
+The primary components used are:
+- `requests` for reliable HTTP retrieval
+- `BeautifulSoup` for HTML parsing
+- `ThreadPoolExecutor` for concurrent scanning
+- Thread-local HTTP sessions for safe connection reuse
+
+Key Features:
+
+Concurrent Scanning:
+Multiple websites can be analyzed simultaneously using a configurable thread pool.
+
+The maximum number of worker threads is controlled with:
+
+--threads NUMBER
+
+Each worker maintains its own HTTP session to avoid thread-safety issues while allowing connection reuse and improved performance.
+
+Automatic Retry Handling:
+HTTP sessions include automatic retry support for temporary network failures and server responses including:
+
+- HTTP 429
+- HTTP 500
+- HTTP 502
+- HTTP 503
+- HTTP 504
+
+Retries use controlled backoff timing to reduce failures caused by temporary service conditions.
+
+HTTP Error Handling:
+Network failures are captured and converted into structured scan reports instead of terminating the entire scan.
+
+Reported conditions include:
+
+- Connection failures
+- Timeouts
+- SSL verification failures
+- HTTP errors
+- Request failures
+- Unexpected processing errors
+
+Each failure is stored with:
+
+- Error category
+- Error message
+- HTTP status when available
+
+Response Safety Controls:
+
+FormMap limits downloaded content size to prevent excessive memory usage.
+
+Default maximum response size:
+
+10 MB
+
+Redirect chains are also monitored.
+
+Maximum redirects:
+
+5
+
+If limits are exceeded, the scan is safely marked as failed.
+
+Internal Link Discovery:
+
+The auditor collects anchor (`<a>`) elements containing `href` attributes and converts relative links into absolute URLs.
+
 Example:
-example.com
-becomes:
-https://example.com
-3. Link Extraction:
-The downloaded HTML is parsed using BeautifulSoup.
-All anchor tags containing `href` attributes are processed:
+
 <a href="/contact">Contact</a>
+
 becomes:
+
 https://example.com/contact
-Only links belonging to the same domain are retained.
+
+Only links belonging to the same hostname are retained.
+
 Duplicate links are automatically removed.
-4. Form Inspection
-Each HTML form is converted into a structured `FormInfo` object.
+
+Optional Internal Link Crawling:
+
+FormMap 3.0 adds:
+
+--follow-internal-links
+
+When enabled, FormMap will follow discovered internal links and analyze additional pages.
+
+Crawler protections include:
+
+- Same-domain restriction
+- Duplicate URL prevention
+- Maximum crawl depth
+- Maximum crawl URL count
+
+Default crawl limits:
+
+Maximum depth:
+1
+
+Maximum URLs:
+500
+
+This provides additional website mapping capability while preventing uncontrolled crawling.
+
+Example:
+
+python FormMap.py \
+    --urls https://example.com \
+    --follow-internal-links
+
+Form Analysis:
+
+Every HTML form discovered is converted into a structured FormInfo object.
+
+Collected information includes:
+
+- Form action URL
+- Submission method
+- Input names
+- Input types
+- Required attributes
+- Autocomplete values
+- Placeholder values
+
 Example form:
+
 <form action="/login" method="post">
     <input type="text" name="username">
     <input type="password" name="password">
 </form>
+
 Produces:
+
 {
   "action": "https://example.com/login",
   "method": "post",
@@ -86,18 +168,27 @@ Produces:
     }
   ]
 }
-5. Broken Form Detection
-The auditor attempts to identify common implementation issues.
-A form may be flagged if:
-* No `action` attribute exists
-* No input elements exist
-* An input field has no name
-* Anonymous text fields are present
-Example problematic form:
+
+Broken Form Detection:
+
+FormMap attempts to identify incomplete or suspicious form structures.
+
+A form may be flagged when:
+
+- No action attribute exists
+- No input fields exist
+- An input field has no name
+- Anonymous text inputs are present
+- Form parsing fails
+
+Example:
+
 <form>
     <input type="text">
 </form>
-Potential findings:
+
+Potential report:
+
 {
   "missing_action": true,
   "missing_inputs": false,
@@ -106,48 +197,140 @@ Potential findings:
     "anonymous_input"
   ]
 }
-Output Directory Structure
-A typical output layout looks like:
+
+Optional Artifact Storage:
+
+By default, FormMap creates:
+
+audit_output/
+
+Example:
+
 audit_output/
 └── example.com/
-    ├── index.html
-    ├── link_map.json
-    ├── form_1.json
-    ├── form_2.json
-    └── form_3.json
-This allows later inspection without re-downloading the target site.
-___Usage Examples___:
-Scan a Single Site:
-python site_auditor.py --urls https://example.com
-Scan Multiple Sites:
-python site_auditor.py \
-    --urls https://example.com,https://example.org
-Scan URLs from a File:
-python site_auditor.py --file targets.txt
-Increase Thread Count
-python site_auditor.py \
-    --file targets.txt \
-    --threads 20
-Export Results to JSON:
-python site_auditor.py \
-    --urls https://example.com \
-    --output json \
-    --out-file report.json
-Disable Local HTML Storage
-python site_auditor.py \
-    --urls https://example.com \
-    --no-save-html
-Example Terminal Output:
+    └── 20260830_120000_a1b2c3d4/
+        ├── index.html
+        ├── link_map.json
+        ├── form_1.json
+        └── form_2.json
+
+Stored artifacts include:
+
+- Retrieved HTML pages
+- Internal link maps
+- Individual form definitions
+
+Artifact storage can be disabled with:
+
+--no-save-html
+
+Reporting:
+
+Results can be displayed directly in the terminal or exported as JSON.
+
+Terminal output example:
+
 === https://example.com ===
+Status: success
+HTTP: 200
+Depth: 0
 Links: 27
 Forms: 3
 Broken forms: 1
-  Form 1: https://example.com/login (post) [2 inputs]
-  Form 2: https://example.com/search (get) [1 inputs]
-  Form 3:  (post) [0 inputs]
-  
-The tool is intentionally lightweight and focuses on static HTML analysis rather than browser automation. It does not execute JavaScript, follow discovered links recursively, submit forms, or perform security testing. Instead, it provides a fast first-pass assessment of site structure and form quality that can be incorporated into larger auditing, QA, scraping, or monitoring workflows.
-Because sessions are stored in thread-local storage, each worker maintains its own connection pool while avoiding shared-session thread safety concerns. This design improves scalability while keeping implementation complexity low.
+
+Form 1:
+https://example.com/login (post) [2 inputs]
+
+Form 2:
+https://example.com/search (get) [1 inputs]
+
+Form 3:
+(post) [0 inputs]
+
+JSON export example:
+
+python FormMap.py \
+    --urls https://example.com \
+    --output json \
+    --out-file report.json
+
+Command Line Usage:
+
+Scan a single website:
+
+python FormMap.py \
+    --urls https://example.com
+
+Scan multiple websites:
+
+python FormMap.py \
+    --urls https://example.com,https://example.org
+
+Scan URLs from a file:
+
+python FormMap.py \
+    --file targets.txt
+
+Increase worker threads:
+
+python FormMap.py \
+    --file targets.txt \
+    --threads 20
+
+Follow internal links:
+
+python FormMap.py \
+    --urls https://example.com \
+    --follow-internal-links
+
+Export JSON:
+
+python FormMap.py \
+    --urls https://example.com \
+    --output json \
+    --out-file report.json
+
+Disable artifact saving:
+
+python FormMap.py \
+    --urls https://example.com \
+    --no-save-html
+
+Enable verbose logging:
+
+python FormMap.py \
+    --urls https://example.com \
+    --verbose
+
+Show version:
+
+python FormMap.py \
+    --version
+
+Design Goals:
+
+FormMap focuses on safe passive HTML analysis rather than browser automation or active security testing.
+
+It does not:
+
+- Execute JavaScript
+- Submit forms
+- Attempt authentication
+- Perform vulnerability exploitation
+- Modify remote systems
+
+Instead, it provides a lightweight first-pass structural audit useful for:
+
+- Website quality checks
+- Documentation
+- QA workflows
+- Site inventory
+- Development review
+- Monitoring pipelines
+
+Because sessions are stored using thread-local storage, each worker maintains its own HTTP connection pool while avoiding unsafe shared session access.
+
+This design improves scalability while keeping the implementation simple, predictable, and maintainable.
 
 """
 import argparse
@@ -156,18 +339,38 @@ import logging
 import threading
 import tempfile
 import time
-from dataclasses import dataclass, asdict, field
+import uuid
+from dataclasses import dataclass,asdict,field
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urljoin,urlparse
+from concurrent.futures import ThreadPoolExecutor,as_completed
 import requests
 from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter
+from requests.exceptions import (
+    ConnectionError,
+    Timeout,
+    HTTPError,
+    SSLError,
+    RequestException
+)
 from urllib3.util.retry import Retry
-logging.basicConfig(level=logging.INFO,format="%(asctime)s [%(levelname)s] %(message)s")
-logger=logging.getLogger("FormMap")
+VERSION="3.0"
 MAX_RESPONSE_SIZE=10*1024*1024
 MAX_THREADS=50
+MAX_REDIRECTS=5
+MAX_CRAWL_DEPTH=1
+MAX_CRAWL_URLS=500
+DEFAULT_TIMEOUT=(5,20)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+logger=logging.getLogger("FormMap")
+@dataclass(slots=True)
+class ScanError:
+    category:str
+    message:str
 @dataclass(slots=True)
 class FormInfo:
     action:str
@@ -181,20 +384,28 @@ class BrokenFormReport:
 @dataclass(slots=True)
 class PageReport:
     url:str
+    status:str="unknown"
+    http_status:int=0
+    elapsed:float=0.0
+    crawl_depth:int=0
     forms:list[FormInfo]=field(default_factory=list)
     links:list[str]=field(default_factory=list)
     broken_forms:list[BrokenFormReport]=field(default_factory=list)
+    errors:list[ScanError]=field(default_factory=list)
 def safe_filename(value:str)->str:
-    return "".join(c if c.isalnum() or c in "._-" else "_" for c in value)
+    return "".join(
+        c if c.isalnum() or c in "._-" else "_"
+        for c in value
+    )
 def normalize_url(url:str):
     if not url:
         return None
-    url=url.strip()
-    if not url:
-        return None
-    if not url.startswith(("http://","https://")):
-        url="https://"+url
     try:
+        url=url.strip()
+        if not url:
+            return None
+        if not url.startswith(("http://","https://")):
+            url="https://"+url
         parsed=urlparse(url)
         if parsed.scheme not in ("http","https"):
             return None
@@ -204,11 +415,19 @@ def normalize_url(url:str):
     except Exception:
         return None
 def domain_name(url:str)->str:
-    parsed=urlparse(url)
-    return safe_filename(parsed.hostname or "unknown")
+    try:
+        parsed=urlparse(url)
+        return safe_filename(
+            parsed.hostname or "unknown"
+        )
+    except Exception:
+        return "unknown"
 def atomic_write(path:Path,data:str):
     try:
-        path.parent.mkdir(parents=True,exist_ok=True)
+        path.parent.mkdir(
+            parents=True,
+            exist_ok=True
+        )
         with tempfile.NamedTemporaryFile(
             "w",
             delete=False,
@@ -219,34 +438,69 @@ def atomic_write(path:Path,data:str):
             temp_name=tmp.name
         Path(temp_name).replace(path)
     except Exception:
-        logger.exception("Atomic write failed")
-
-def create_session()->requests.Session:
+        logger.exception(
+            "Atomic write failed: %s",
+            path
+        )
+def create_session():
     session=requests.Session()
     retry=Retry(
         total=3,
+        connect=3,
+        read=3,
         backoff_factor=0.5,
-        status_forcelist=[500,502,503,504],
-        allowed_methods=["GET"]
+        status_forcelist=[
+            429,
+            500,
+            502,
+            503,
+            504
+        ],
+        allowed_methods=[
+            "GET"
+        ],
+        raise_on_status=False
     )
     adapter=HTTPAdapter(
         max_retries=retry,
         pool_connections=10,
         pool_maxsize=10
     )
-    session.mount("http://",adapter)
-    session.mount("https://",adapter)
+    session.mount(
+        "http://",
+        adapter
+    )
+    session.mount(
+        "https://",
+        adapter
+    )
     session.headers.update({
-        "User-Agent":"Mozilla/5.0 (compatible; FormMap/1.0)"
+        "User-Agent":
+            "Mozilla/5.0 "
+            "(X11; Linux x86_64) "
+            "FormMap/"+VERSION,
+        "Accept":
+            "text/html,application/xhtml+xml",
+        "Accept-Language":
+            "en-US,en;q=0.9",
+        "Accept-Encoding":
+            "gzip, deflate",
+        "Connection":
+            "keep-alive"
     })
     return session
 class SiteAuditor:
-    def __init__(self,urls,max_threads=5,output_mode="terminal",output_file=None,save_html=True):
-        self.urls=[normalize_url(u) for u in urls if normalize_url(u)]
+    def __init__(self,urls,max_threads=5,output_mode="terminal",output_file=None,save_html=True,follow_internal_links=False):
+        self.urls=[]
+        for url in urls:
+            normalized=normalize_url(url)
+            if normalized:
+                self.urls.append(normalized)
         self.max_threads=max(1,min(max_threads,MAX_THREADS))
         self.output_mode=output_mode
         self.output_file=Path(output_file) if output_file else None
         self.save_html_enabled=save_html
+        self.follow_internal_links=follow_internal_links
         self.thread_local=threading.local()
         self.results=[]
         self.base_output=Path("audit_output")
@@ -256,123 +510,382 @@ class SiteAuditor:
             self.thread_local.session=create_session()
         return self.thread_local.session
     def fetch(self,url):
-        response=self.session().get(url,timeout=(5,20),stream=True)
-        response.raise_for_status()
-        size=0
-        chunks=[]
-        for chunk in response.iter_content(8192):
-            size+=len(chunk)
-            if size>MAX_RESPONSE_SIZE:
-                raise ValueError("Response exceeded size limit")
-            chunks.append(chunk)
-        return b"".join(chunks).decode("utf-8",errors="replace")
+        try:
+            response=self.session().get(
+                url,
+                timeout=DEFAULT_TIMEOUT,
+                stream=True,
+                allow_redirects=True
+            )
+            if len(response.history)>MAX_REDIRECTS:
+                raise ValueError(
+                    "Too many redirects"
+                )
+            size=0
+            chunks=[]
+            for chunk in response.iter_content(8192):
+                if chunk:
+                    size+=len(chunk)
+                    if size>MAX_RESPONSE_SIZE:
+                        raise ValueError(
+                            "Response exceeded size limit"
+                        )
+                    chunks.append(chunk)
+            content=b"".join(chunks).decode(
+                "utf-8",
+                errors="replace"
+            )
+            return content,response.status_code
+        except HTTPError as e:
+            raise RuntimeError(
+                f"HTTP error: {e.response.status_code} {e.response.reason}"
+            )
+        except Timeout:
+            raise RuntimeError(
+                "Request timed out"
+            )
+        except SSLError:
+            raise RuntimeError(
+                "SSL verification failed"
+            )
+        except ConnectionError:
+            raise RuntimeError(
+                "Connection failed"
+            )
+        except RequestException as e:
+            raise RuntimeError(
+                f"Request failed: {e}"
+            )
     def save_html(self,folder,name,content):
         path=folder/name
-        atomic_write(path,content)
+        atomic_write(
+            path,
+            content
+        )
         return str(path)
     def extract_links(self,soup,url):
         links=set()
-        base=urlparse(url).hostname
-        for tag in soup.find_all("a",href=True):
-            try:
-                full=urljoin(url,tag["href"])
-                parsed=urlparse(full)
-                if parsed.hostname==base:
-                    links.add(full)
-            except Exception:
-                continue
+        try:
+            base=urlparse(url).hostname
+            for tag in soup.find_all(
+                "a",
+                href=True
+            ):
+                try:
+                    full=urljoin(
+                        url,
+                        tag["href"]
+                    )
+                    parsed=urlparse(full)
+                    if parsed.hostname==base:
+                        links.add(full)
+                except Exception:
+                    continue
+        except Exception:
+            logger.exception(
+                "Link extraction failed"
+            )
         return sorted(links)
     def inspect_form(self,form,url):
-        action=form.get("action")
-        method=(form.get("method") or "get").lower()
-        inputs=[]
-        suspicious=set()
-        for inp in form.find_all("input"):
-            data={
-                "name":inp.get("name"),
-                "type":inp.get("type"),
-                "required":inp.has_attr("required"),
-                "autocomplete":inp.get("autocomplete"),
-                "placeholder":inp.get("placeholder")
-            }
-            inputs.append(data)
-            if not data["name"]:
-                suspicious.add("missing_input_name")
-                if data["type"] in (None,"","text"):
-                    suspicious.add("anonymous_input")
-        info=FormInfo(
-            action=urljoin(url,action) if action else "",
-            method=method,
-            inputs=inputs
-        )
-        broken=BrokenFormReport(
-            missing_action=not bool(action),
-            missing_inputs=not bool(inputs),
-            suspicious_fields=sorted(suspicious)
-        )
-        return info,broken
-    def analyze(self,url):
-        logger.info("Scanning %s",url)
-        parsed=urlparse(url)
-        folder=self.base_output/domain_name(url)
-        timestamp=time.strftime("%Y%m%d_%H%M%S")
-        scan_folder=folder/timestamp
-        scan_folder.mkdir(parents=True,exist_ok=True)
-        html=self.fetch(url)
-        if self.save_html_enabled:
-            self.save_html(scan_folder,"index.html",html)
-        soup=BeautifulSoup(html,"html.parser")
-        links=self.extract_links(soup,url)
-        if self.save_html_enabled:
-            atomic_write(
-                scan_folder/"link_map.json",
-                json.dumps(links,indent=2)
+        try:
+            action=form.get("action")
+            method=(form.get("method") or "get").lower()
+            inputs=[]
+            suspicious=set()
+            for inp in form.find_all("input"):
+                data={
+                    "name":inp.get("name"),
+                    "type":inp.get("type"),
+                    "required":inp.has_attr("required"),
+                    "autocomplete":inp.get("autocomplete"),
+                    "placeholder":inp.get("placeholder")
+                }
+                inputs.append(data)
+                if not data["name"]:
+                    suspicious.add(
+                        "missing_input_name"
+                    )
+                    if data["type"] in (
+                        None,
+                        "",
+                        "text"
+                    ):
+                        suspicious.add(
+                            "anonymous_input"
+                        )
+            info=FormInfo(
+                action=urljoin(url,action) if action else "",
+                method=method,
+                inputs=inputs
             )
-        forms=[]
-        broken_forms=[]
-        for index,form in enumerate(soup.find_all("form"),1):
-            info,broken=self.inspect_form(form,url)
-            forms.append(info)
-            if (
-                broken.missing_action
-                or broken.missing_inputs
-                or broken.suspicious_fields
-            ):
-                broken_forms.append(broken)
+            broken=BrokenFormReport(
+                missing_action=not bool(action),
+                missing_inputs=not bool(inputs),
+                suspicious_fields=sorted(suspicious)
+            )
+            return info,broken
+        except Exception:
+            return (
+                FormInfo(
+                    action="",
+                    method="unknown",
+                    inputs=[]
+                ),
+                BrokenFormReport(
+                    suspicious_fields=[
+                        "form_parse_error"
+                    ]
+                )
+            )
+    def analyze(self,url,depth=0):
+        start=time.time()
+        report=PageReport(
+            url=url,
+            crawl_depth=depth
+        )
+        logger.info(
+            "Scanning %s",
+            url
+        )
+        folder=self.base_output/domain_name(url)
+        timestamp=time.strftime("%Y%m%d_%H%M%S")+"_"+uuid.uuid4().hex[:8]
+        scan_folder=folder/timestamp
+        scan_folder.mkdir(
+            parents=True,
+            exist_ok=True
+        )
+        try:
+            html,status=self.fetch(url)
+            report.http_status=status
+            report.status="success"
+            if self.save_html_enabled:
+                self.save_html(
+                    scan_folder,
+                    "index.html",
+                    html
+                )
+            soup=BeautifulSoup(
+                html,
+                "html.parser"
+            )
+            report.links=self.extract_links(
+                soup,
+                url
+            )
             if self.save_html_enabled:
                 atomic_write(
-                    scan_folder/f"form_{index}.json",
-                    json.dumps(asdict(info),indent=2)
+                    scan_folder/"link_map.json",
+                    json.dumps(
+                        report.links,
+                        indent=2
+                    )
                 )
-        return PageReport(
-            url=url,
-            forms=forms,
-            links=links,
-            broken_forms=broken_forms
+            for index,form in enumerate(
+                soup.find_all("form"),
+                1
+            ):
+                info,broken=self.inspect_form(
+                    form,
+                    url
+                )
+                report.forms.append(
+                    info
+                )
+                if (
+                    broken.missing_action
+                    or broken.missing_inputs
+                    or broken.suspicious_fields
+                ):
+                    report.broken_forms.append(
+                        broken
+                    )
+                if self.save_html_enabled:
+                    atomic_write(
+                        scan_folder/f"form_{index}.json",
+                        json.dumps(
+                            asdict(info),
+                            indent=2
+                        )
+                    )
+        except RuntimeError as e:
+            message=str(e)
+            report.status="failed"
+            if "HTTP error:" in message:
+                try:
+                    report.http_status=int(
+                        message.split()[2]
+                    )
+                except Exception:
+                    pass
+            report.errors.append(
+                ScanError(
+                    category="network",
+                    message=message
+                )
+            )
+            logger.warning(
+                "%s failed: %s",
+                url,
+                message
+            )
+        except Exception as e:
+            report.status="failed"
+            report.errors.append(
+                ScanError(
+                    category="unexpected",
+                    message=str(e)
+                )
+            )
+            logger.exception(
+                "Unexpected scan failure: %s",
+                url
+            )
+        report.elapsed=round(
+            time.time()-start,
+            3
         )
+        return report
+    def crawl_internal(self,start_url):
+        visited=set()
+        queue=[
+            (
+                start_url,
+                0
+            )
+        ]
+        reports=[]
+        while queue:
+            if len(visited)>=MAX_CRAWL_URLS:
+                logger.warning(
+                    "Maximum crawl URL limit reached"
+                )
+                break
+            url,depth=queue.pop(0)
+            if url in visited:
+                continue
+            if depth>MAX_CRAWL_DEPTH:
+                continue
+            visited.add(url)
+            report=self.analyze(
+                url,
+                depth
+            )
+            reports.append(
+                report
+            )
+            if self.follow_internal_links and report.status=="success":
+                for link in report.links:
+                    if link not in visited:
+                        queue.append(
+                            (
+                                link,
+                                depth+1
+                            )
+                        )
+        return reports
     def run(self):
-        with ThreadPoolExecutor(max_workers=self.max_threads) as executor:
-            jobs={
-                executor.submit(self.analyze,url):url
-                for url in self.urls
-            }
+        with ThreadPoolExecutor(
+            max_workers=self.max_threads
+        ) as executor:
+            jobs={}
+            for url in self.urls:
+                if self.follow_internal_links:
+                    jobs[
+                        executor.submit(
+                            self.crawl_internal,
+                            url
+                        )
+                    ]=url
+                else:
+                    jobs[
+                        executor.submit(
+                            self.analyze,
+                            url
+                        )
+                    ]=url
             for future in as_completed(jobs):
                 try:
-                    self.results.append(future.result())
-                except Exception:
+                    result=future.result()
+                    if isinstance(
+                        result,
+                        list
+                    ):
+                        self.results.extend(
+                            result
+                        )
+                    else:
+                        self.results.append(
+                            result
+                        )
+                except Exception as e:
                     logger.exception(
-                        "Scan failed for %s",
+                        "Worker failure for %s",
                         jobs[future]
                     )
+                    self.results.append(
+                        PageReport(
+                            url=jobs[future],
+                            status="failed",
+                            errors=[
+                                ScanError(
+                                    category="worker",
+                                    message=str(e)
+                                )
+                            ]
+                        )
+                    )
+        self.results.sort(
+            key=lambda x:x.url
+        )
         return self.results
     def print_results(self):
         for report in self.results:
             print()
-            print("=== "+report.url+" ===")
-            print("Links:",len(report.links))
-            print("Forms:",len(report.forms))
-            print("Broken forms:",len(report.broken_forms))
-            for number,form in enumerate(report.forms,1):
+            print(
+                "=== "+report.url+" ==="
+            )
+            print(
+                "Status:",
+                report.status
+            )
+            print(
+                "Depth:",
+                report.crawl_depth
+            )
+            if report.http_status:
+                print(
+                    "HTTP:",
+                    report.http_status
+                )
+            if report.elapsed:
+                print(
+                    "Time:",
+                    report.elapsed,
+                    "seconds"
+                )
+            if report.errors:
+                for error in report.errors:
+                    print(
+                        "Error:",
+                        error.category,
+                        error.message
+                    )
+            print(
+                "Links:",
+                len(report.links)
+            )
+            print(
+                "Forms:",
+                len(report.forms)
+            )
+            print(
+                "Broken forms:",
+                len(report.broken_forms)
+            )
+            for number,form in enumerate(
+                report.forms,
+                1
+            ):
                 print(
                     f"  Form {number}: "
                     f"{form.action} "
@@ -381,11 +894,17 @@ class SiteAuditor:
                 )
     def export_json(self):
         data=json.dumps(
-            [asdict(r) for r in self.results],
+            [
+                asdict(report)
+                for report in self.results
+            ],
             indent=2
         )
         if self.output_file:
-            atomic_write(self.output_file,data)
+            atomic_write(
+                self.output_file,
+                data
+            )
             logger.info(
                 "Saved JSON -> %s",
                 self.output_file
@@ -398,26 +917,37 @@ class SiteAuditor:
         else:
             self.print_results()
 def load_urls(args):
+    urls=[]
     if args.file:
         try:
-            return [
-                normalize_url(line.strip())
-                for line in Path(args.file).read_text(
-                    encoding="utf-8"
-                ).splitlines()
-                if line.strip()
-            ]
+            urls.extend(
+                [
+                    line.strip()
+                    for line in Path(args.file).read_text(
+                        encoding="utf-8"
+                    ).splitlines()
+                    if line.strip()
+                ]
+            )
         except Exception:
-            logger.exception("Failed reading URL file")
-            return []
-    return [
-        normalize_url(url.strip())
-        for url in args.urls.split(",")
-        if url.strip()
-    ]
+            logger.exception(
+                "Failed reading URL file"
+            )
+    if args.urls:
+        urls.extend(
+            [
+                item.strip()
+                for item in args.urls.split(",")
+                if item.strip()
+            ]
+        )
+    return urls
 def main():
     parser=argparse.ArgumentParser(
-        description="FormMap - HTML structure and form auditor"
+        description=(
+            "FormMap - Static HTML "
+            "structure and form auditor"
+        )
     )
     parser.add_argument(
         "--urls",
@@ -435,8 +965,12 @@ def main():
     )
     parser.add_argument(
         "--output",
-        choices=["terminal","json"],
-        default="terminal"
+        choices=[
+            "terminal",
+            "json"
+        ],
+        default="terminal",
+        help="Output format"
     )
     parser.add_argument(
         "--out-file",
@@ -445,16 +979,44 @@ def main():
     parser.add_argument(
         "--no-save-html",
         action="store_true",
-        help="Disable HTML and artifact saving"
+        help="Disable HTML artifact saving"
+    )
+    parser.add_argument(
+        "--follow-internal-links",
+        action="store_true",
+        help=(
+            "Follow same-domain internal links "
+            "with bounded crawl depth"
+        )
+    )
+    parser.add_argument(
+        "--version",
+        action="store_true",
+        help="Show FormMap version"
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable verbose logging"
     )
     args=parser.parse_args()
+    if args.version:
+        print(
+            "FormMap",
+            VERSION
+        )
+        return
+    if args.verbose:
+        logger.setLevel(
+            logging.DEBUG
+        )
     if not args.urls and not args.file:
         parser.error(
             "Provide --urls or --file"
         )
     urls=[
         u for u in load_urls(args)
-        if u
+        if normalize_url(u)
     ]
     if not urls:
         parser.error(
@@ -465,7 +1027,8 @@ def main():
         max_threads=args.threads,
         output_mode=args.output,
         output_file=args.out_file,
-        save_html=not args.no_save_html
+        save_html=not args.no_save_html,
+        follow_internal_links=args.follow_internal_links
     )
     auditor.run()
     auditor.output()
