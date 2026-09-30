@@ -332,6 +332,7 @@ Because sessions are stored using thread-local storage, each worker maintains it
 
 This design improves scalability while keeping the implementation simple, predictable, and maintainable.
 """
+#!/usr/bin/python3
 import argparse
 import json
 import logging
@@ -361,6 +362,24 @@ MAX_REDIRECTS=5
 MAX_CRAWL_DEPTH=1
 MAX_CRAWL_URLS=500
 DEFAULT_TIMEOUT=(5,20)
+ALLOWED_CONTENT_TYPES=(
+    "text/html",
+    "application/xhtml+xml"
+)
+DEFAULT_HEADERS={
+    "User-Agent":
+        "Mozilla/5.0 "
+        "(X11; Linux x86_64) "
+        "FormMap/"+VERSION,
+    "Accept":
+        "text/html,application/xhtml+xml",
+    "Accept-Language":
+        "en-US,en;q=0.9",
+    "Accept-Encoding":
+        "identity",
+    "Connection":
+        "keep-alive"
+}
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s"
@@ -392,14 +411,17 @@ class PageReport:
     broken_forms:list[BrokenFormReport]=field(default_factory=list)
     errors:list[ScanError]=field(default_factory=list)
 def safe_filename(value:str)->str:
-    return "".join(
-        c if c.isalnum() or c in "._-" else "_"
-        for c in value
-    )
-def normalize_url(url:str):
-    if not url:
-        return None
     try:
+        return "".join(
+            c if c.isalnum() or c in "._-" else "_"
+            for c in value
+        )
+    except Exception:
+        return "unknown"
+def normalize_url(url:str):
+    try:
+        if not url:
+            return None
         url=url.strip()
         if not url:
             return None
@@ -418,17 +440,19 @@ def normalize_url(url:str):
             return None
         if not parsed.hostname:
             return None
-        normalized=parsed._replace(
+        return parsed._replace(
             fragment=""
-        ).geturl()
-        return normalized.rstrip("/")
-    except Exception:
+        ).geturl().rstrip("/")
+    except Exception as e:
+        logger.debug(
+            "URL normalization failed: %s",
+            e
+        )
         return None
 def domain_name(url:str)->str:
     try:
-        parsed=urlparse(url)
         return safe_filename(
-            parsed.hostname or "unknown"
+            urlparse(url).hostname or "unknown"
         )
     except Exception:
         return "unknown"
@@ -446,15 +470,17 @@ def atomic_write(path:Path,data:str):
             dir=str(path.parent)
         ) as tmp:
             tmp.write(data)
+            tmp.flush()
             temp_name=tmp.name
         Path(temp_name).replace(
             path
         )
         temp_name=None
-    except Exception:
+    except Exception as e:
         logger.exception(
-            "Atomic write failed: %s",
-            path
+            "Atomic write failed: %s (%s)",
+            path,
+            e
         )
     finally:
         if temp_name:
@@ -463,54 +489,54 @@ def atomic_write(path:Path,data:str):
                 if temp_path.exists():
                     temp_path.unlink()
             except Exception:
-                pass
+                logger.debug(
+                    "Temporary cleanup failed",
+                    exc_info=True
+                )
 def create_session():
-    session=requests.Session()
-    retry=Retry(
-        total=3,
-        connect=3,
-        read=3,
-        backoff_factor=0.5,
-        status_forcelist=[
-            429,
-            500,
-            502,
-            503,
-            504
-        ],
-        allowed_methods=[
-            "GET"
-        ],
-        raise_on_status=False
-    )
-    adapter=HTTPAdapter(
-        max_retries=retry,
-        pool_connections=10,
-        pool_maxsize=10
-    )
-    session.mount(
-        "http://",
-        adapter
-    )
-    session.mount(
-        "https://",
-        adapter
-    )
-    session.headers.update({
-        "User-Agent":
-            "Mozilla/5.0 "
-            "(X11; Linux x86_64) "
-            "FormMap/"+VERSION,
-        "Accept":
-            "text/html,application/xhtml+xml",
-        "Accept-Language":
-            "en-US,en;q=0.9",
-        "Accept-Encoding":
-            "identity",
-        "Connection":
-            "keep-alive"
-    })
-    return session
+    try:
+        session=requests.Session()
+        retry=Retry(
+            total=3,
+            connect=3,
+            read=3,
+            backoff_factor=0.5,
+            status_forcelist=(
+                429,
+                500,
+                502,
+                503,
+                504
+            ),
+            allowed_methods=frozenset(
+                [
+                    "GET"
+                ]
+            ),
+            raise_on_status=False
+        )
+        adapter=HTTPAdapter(
+            max_retries=retry,
+            pool_connections=10,
+            pool_maxsize=10
+        )
+        session.mount(
+            "http://",
+            adapter
+        )
+        session.mount(
+            "https://",
+            adapter
+        )
+        session.headers.update(
+            DEFAULT_HEADERS
+        )
+        return session
+    except Exception:
+        logger.exception(
+            "Session creation failed"
+        )
+        raise
 class SiteAuditor:
     def __init__(
         self,
@@ -521,23 +547,35 @@ class SiteAuditor:
         save_html=True,
         follow_internal_links=False
     ):
-        self.urls=[]
-        for url in urls:
-            normalized=normalize_url(url)
-            if normalized:
-                self.urls.append(normalized)
-        self.urls=list(dict.fromkeys(self.urls))
+        self.urls=list(
+            dict.fromkeys(
+                normalized
+                for normalized in (
+                    normalize_url(url)
+                    for url in urls
+                )
+                if normalized
+            )
+        )
         self.max_threads=max(
             1,
             min(
-                max_threads,
+                int(max_threads),
                 MAX_THREADS
             )
         )
         self.output_mode=output_mode
-        self.output_file=Path(output_file) if output_file else None
-        self.save_html_enabled=save_html
-        self.follow_internal_links=follow_internal_links
+        self.output_file=(
+            Path(output_file)
+            if output_file
+            else None
+        )
+        self.save_html_enabled=bool(
+            save_html
+        )
+        self.follow_internal_links=bool(
+            follow_internal_links
+        )
         self.thread_local=threading.local()
         self.results=[]
         self.results_lock=threading.Lock()
@@ -546,28 +584,47 @@ class SiteAuditor:
         self.base_output=Path(
             "audit_output"
         )
-        self.base_output.mkdir(
-            exist_ok=True
-        )
+        try:
+            self.base_output.mkdir(
+                exist_ok=True
+            )
+        except Exception:
+            logger.exception(
+                "Failed creating output directory"
+            )
     def session(self):
-        if not hasattr(
-            self.thread_local,
-            "session"
-        ):
-            self.thread_local.session=create_session()
-        return self.thread_local.session
+        try:
+            session=getattr(
+                self.thread_local,
+                "session",
+                None
+            )
+            if session is None:
+                session=create_session()
+                self.thread_local.session=session
+            return session
+        except Exception:
+            logger.exception(
+                "Session initialization failed"
+            )
+            raise
     def close_session(self):
-        session=getattr(
-            self.thread_local,
-            "session",
-            None
-        )
-        if session:
-            try:
+        try:
+            session=getattr(
+                self.thread_local,
+                "session",
+                None
+            )
+            if session:
                 session.close()
-            except Exception:
-                pass
+                self.thread_local.session=None
+        except Exception:
+            logger.debug(
+                "Session close failed",
+                exc_info=True
+            )
     def fetch(self,url):
+        response=None
         try:
             response=self.session().get(
                 url,
@@ -576,7 +633,7 @@ class SiteAuditor:
                 allow_redirects=True
             )
             if len(response.history)>MAX_REDIRECTS:
-                raise ValueError(
+                raise RuntimeError(
                     "Too many redirects"
                 )
             response.raise_for_status()
@@ -586,10 +643,7 @@ class SiteAuditor:
             ).lower()
             if content_type and not any(
                 allowed in content_type
-                for allowed in (
-                    "text/html",
-                    "application/xhtml+xml"
-                )
+                for allowed in ALLOWED_CONTENT_TYPES
             ):
                 raise RuntimeError(
                     "Unsupported content type: "
@@ -598,12 +652,12 @@ class SiteAuditor:
             size=0
             chunks=[]
             for chunk in response.iter_content(
-                8192
+                chunk_size=8192
             ):
                 if chunk:
                     size+=len(chunk)
                     if size>MAX_RESPONSE_SIZE:
-                        raise ValueError(
+                        raise RuntimeError(
                             "Response exceeded size limit"
                         )
                     chunks.append(chunk)
@@ -615,7 +669,11 @@ class SiteAuditor:
             )
             return content,response.status_code
         except HTTPError as e:
-            status=e.response.status_code if e.response else 0
+            status=(
+                e.response.status_code
+                if e.response
+                else 0
+            )
             raise RuntimeError(
                 f"HTTP error: {status}"
             )
@@ -635,18 +693,39 @@ class SiteAuditor:
             raise RuntimeError(
                 f"Request failed: {e}"
             )
+        except Exception:
+            logger.exception(
+                "Unexpected fetch failure: %s",
+                url
+            )
+            raise
+        finally:
+            if response:
+                try:
+                    response.close()
+                except Exception:
+                    logger.debug(
+                        "Response cleanup failed",
+                        exc_info=True
+                    )
     def save_html(
         self,
         folder,
         name,
         content
     ):
-        path=folder/name
-        atomic_write(
-            path,
-            content
-        )
-        return str(path)
+        try:
+            path=folder/name
+            atomic_write(
+                path,
+                content
+            )
+            return str(path)
+        except Exception:
+            logger.exception(
+                "HTML save failed"
+            )
+            return ""
     def extract_links(
         self,
         soup,
@@ -706,44 +785,50 @@ class SiteAuditor:
                     "button"
                 ]
             ):
-                tag_name=inp.name
-                data={
-                    "element":tag_name,
-                    "name":inp.get("name"),
-                    "type":inp.get("type"),
-                    "required":inp.has_attr(
-                        "required"
-                    ),
-                    "autocomplete":inp.get(
-                        "autocomplete"
-                    ),
-                    "placeholder":inp.get(
-                        "placeholder"
-                    )
-                }
-                inputs.append(
-                    data
-                )
-                if not data["name"]:
-                    suspicious.add(
-                        "missing_input_name"
-                    )
-                    if (
-                        data["type"] in
-                        (
-                            None,
-                            "",
-                            "text"
+                try:
+                    tag_name=inp.name
+                    data={
+                        "element":tag_name,
+                        "name":inp.get("name"),
+                        "type":inp.get("type"),
+                        "required":inp.has_attr(
+                            "required"
+                        ),
+                        "autocomplete":inp.get(
+                            "autocomplete"
+                        ),
+                        "placeholder":inp.get(
+                            "placeholder"
                         )
-                        or tag_name in
-                        (
-                            "textarea",
-                            "select"
-                        )
-                    ):
+                    }
+                    inputs.append(
+                        data
+                    )
+                    if not data["name"]:
                         suspicious.add(
-                            "anonymous_input"
+                            "missing_input_name"
                         )
+                        if (
+                            data["type"] in
+                            (
+                                None,
+                                "",
+                                "text"
+                            )
+                            or tag_name in
+                            (
+                                "textarea",
+                                "select"
+                            )
+                        ):
+                            suspicious.add(
+                                "anonymous_input"
+                            )
+                except Exception:
+                    logger.debug(
+                        "Input parsing failed",
+                        exc_info=True
+                    )
             info=FormInfo(
                 action=urljoin(
                     url,
@@ -767,6 +852,10 @@ class SiteAuditor:
             )
             return info,broken
         except Exception:
+            logger.debug(
+                "Form inspection failed",
+                exc_info=True
+            )
             return (
                 FormInfo(
                     action="",
@@ -784,10 +873,10 @@ class SiteAuditor:
         url,
         depth=0
     ):
-        start=time.time()
+        start=time.monotonic()
         report=PageReport(
-            url=url,
-            crawl_depth=depth
+            url=str(url),
+            crawl_depth=int(depth)
         )
         logger.info(
             "Scanning %s",
@@ -804,10 +893,15 @@ class SiteAuditor:
             +uuid.uuid4().hex[:8]
         )
         scan_folder=folder/timestamp
-        scan_folder.mkdir(
-            parents=True,
-            exist_ok=True
-        )
+        try:
+            scan_folder.mkdir(
+                parents=True,
+                exist_ok=True
+            )
+        except Exception:
+            logger.exception(
+                "Failed creating scan folder"
+            )
         try:
             html,status=self.fetch(
                 url
@@ -891,7 +985,7 @@ class SiteAuditor:
                 url
             )
         report.elapsed=round(
-            time.time()-start,
+            time.monotonic()-start,
             3
         )
         self.close_session()
@@ -907,200 +1001,300 @@ class SiteAuditor:
             )
         ]
         reports=[]
-        while queue:
-            if len(reports)>=MAX_CRAWL_URLS:
-                logger.warning(
-                    "Maximum crawl URL limit reached"
-                )
-                break
-            url,depth=queue.pop(0)
-            if depth>MAX_CRAWL_DEPTH:
-                continue
-            with self.visited_lock:
-                if url in self.visited:
+        try:
+            while queue:
+                if len(reports)>=MAX_CRAWL_URLS:
+                    logger.warning(
+                        "Maximum crawl URL limit reached"
+                    )
+                    break
+                url,depth=queue.pop(0)
+                if depth>MAX_CRAWL_DEPTH:
                     continue
-                self.visited.add(
-                    url
-                )
-            report=self.analyze(
-                url,
-                depth
-            )
-            reports.append(
-                report
-            )
-            if (
-                self.follow_internal_links
-                and report.status=="success"
-            ):
-                for link in report.links:
-                    if link not in self.visited:
-                        queue.append(
-                            (
-                                link,
-                                depth+1
-                            )
-                        )
-        return reports
-    def run(self):
-        with ThreadPoolExecutor(
-            max_workers=self.max_threads
-        ) as executor:
-            jobs={}
-            for url in self.urls:
-                if self.follow_internal_links:
-                    future=executor.submit(
-                        self.crawl_internal,
+                with self.visited_lock:
+                    if url in self.visited:
+                        continue
+                    self.visited.add(
                         url
                     )
-                else:
-                    future=executor.submit(
-                        self.analyze,
-                        url
-                    )
-                jobs[future]=url
-            for future in as_completed(jobs):
                 try:
-                    result=future.result()
-                    if isinstance(
-                        result,
-                        list
-                    ):
-                        with self.results_lock:
-                            self.results.extend(
-                                result
-                            )
-                    else:
-                        with self.results_lock:
-                            self.results.append(
-                                result
-                            )
+                    report=self.analyze(
+                        url,
+                        depth
+                    )
                 except Exception as e:
                     logger.exception(
-                        "Worker failure for %s",
-                        jobs[future]
+                        "Crawl failure: %s",
+                        url
                     )
-                    with self.results_lock:
-                        self.results.append(
-                            PageReport(
-                                url=jobs[future],
-                                status="failed",
-                                errors=[
-                                    ScanError(
-                                        category="worker",
-                                        message=str(e)
-                                    )
-                                ]
+                    report=PageReport(
+                        url=str(url),
+                        status="failed",
+                        crawl_depth=depth,
+                        errors=[
+                            ScanError(
+                                category="crawl",
+                                message=str(e)
                             )
-                        )
-        self.results.sort(
-            key=lambda x:x.url
-        )
-        return self.results
-    def print_results(self):
-        for report in self.results:
-            print()
-            print(
-                "=== "+report.url+" ==="
-            )
-            print(
-                "Status:",
-                report.status
-            )
-            print(
-                "Depth:",
-                report.crawl_depth
-            )
-            if report.http_status:
-                print(
-                    "HTTP:",
-                    report.http_status
-                )
-            if report.elapsed:
-                print(
-                    "Time:",
-                    report.elapsed,
-                    "seconds"
-                )
-            if report.errors:
-                for error in report.errors:
-                    print(
-                        "Error:",
-                        error.category,
-                        error.message
+                        ]
                     )
-            print(
-                "Links:",
-                len(report.links)
+                if isinstance(
+                    report,
+                    PageReport
+                ):
+                    reports.append(
+                        report
+                    )
+                if (
+                    self.follow_internal_links
+                    and isinstance(
+                        report,
+                        PageReport
+                    )
+                    and report.status=="success"
+                ):
+                    for link in report.links:
+                        with self.visited_lock:
+                            visited=link in self.visited
+                        if not visited:
+                            queue.append(
+                                (
+                                    link,
+                                    depth+1
+                                )
+                            )
+        except Exception:
+            logger.exception(
+                "Internal crawl failed"
             )
-            print(
-                "Forms:",
-                len(report.forms)
-            )
-            print(
-                "Broken forms:",
-                len(report.broken_forms)
-            )
-            for number,form in enumerate(
-                report.forms,
-                1
-            ):
-                print(
-                    f"  Form {number}: "
-                    f"{form.action} "
-                    f"({form.method}) "
-                    f"[{len(form.inputs)} inputs]"
-                )
-    def export_json(self):
-        data=json.dumps(
-            [
-                asdict(report)
-                for report in self.results
-            ],
-            indent=2
-        )
-        if self.output_file:
-            atomic_write(
-                self.output_file,
-                data
-            )
-            logger.info(
-                "Saved JSON -> %s",
-                self.output_file
-            )
-        else:
-            print(data)
-    def output(self):
-        if self.output_mode=="json":
-            self.export_json()
-        else:
-            self.print_results()
-def load_urls(args):
-    urls=[]
-    if args.file:
+        return reports
+    def run(self):
+        jobs={}
         try:
-            urls.extend(
-                [
-                    line.strip()
-                    for line in Path(args.file)
-                    .read_text(
-                        encoding="utf-8"
-                    )
-                    .splitlines()
-                    if line.strip()
-                ]
+            with ThreadPoolExecutor(
+                max_workers=self.max_threads
+            ) as executor:
+                for url in self.urls:
+                    try:
+                        if self.follow_internal_links:
+                            future=executor.submit(
+                                self.crawl_internal,
+                                url
+                            )
+                        else:
+                            future=executor.submit(
+                                self.analyze,
+                                url
+                            )
+                        jobs[future]=url
+                    except Exception:
+                        logger.exception(
+                            "Failed submitting job: %s",
+                            url
+                        )
+                for future in as_completed(
+                    jobs
+                ):
+                    target=jobs[future]
+                    try:
+                        result=future.result()
+                        with self.results_lock:
+                            if isinstance(
+                                result,
+                                list
+                            ):
+                                for item in result:
+                                    if isinstance(
+                                        item,
+                                        PageReport
+                                    ):
+                                        self.results.append(
+                                            item
+                                        )
+                            elif isinstance(
+                                result,
+                                PageReport
+                            ):
+                                self.results.append(
+                                    result
+                                )
+                            else:
+                                logger.warning(
+                                    "Ignoring invalid worker result from %s",
+                                    target
+                                )
+                    except Exception as e:
+                        logger.exception(
+                            "Worker failure for %s",
+                            target
+                        )
+                        with self.results_lock:
+                            self.results.append(
+                                PageReport(
+                                    url=str(target),
+                                    status="failed",
+                                    errors=[
+                                        ScanError(
+                                            category="worker",
+                                            message=str(e)
+                                        )
+                                    ]
+                                )
+                            )
+        except Exception:
+            logger.exception(
+                "Executor failure"
+            )
+        self.results=[
+            item
+            for item in self.results
+            if isinstance(
+                item,
+                PageReport
+            )
+        ]
+        try:
+            self.results.sort(
+                key=lambda x:x.url or ""
             )
         except Exception:
             logger.exception(
-                "Failed reading URL file"
+                "Result sorting failed"
             )
-    if args.urls:
-        urls.extend(
-            [
-                item.strip()
-                for item in args.urls.split(",")
-                if item.strip()
-            ]
+        return self.results
+    def print_results(self):
+        try:
+            for report in self.results:
+                print()
+                print(
+                    "=== "+report.url+" ==="
+                )
+                print(
+                    "Status:",
+                    report.status
+                )
+                print(
+                    "Depth:",
+                    report.crawl_depth
+                )
+                if report.http_status:
+                    print(
+                        "HTTP:",
+                        report.http_status
+                    )
+                if report.elapsed:
+                    print(
+                        "Time:",
+                        report.elapsed,
+                        "seconds"
+                    )
+                if report.errors:
+                    for error in report.errors:
+                        print(
+                            "Error:",
+                            error.category,
+                            error.message
+                        )
+                print(
+                    "Links:",
+                    len(report.links)
+                )
+                print(
+                    "Forms:",
+                    len(report.forms)
+                )
+                print(
+                    "Broken forms:",
+                    len(report.broken_forms)
+                )
+                for number,form in enumerate(
+                    report.forms,
+                    1
+                ):
+                    print(
+                        f"  Form {number}: "
+                        f"{form.action} "
+                        f"({form.method}) "
+                        f"[{len(form.inputs)} inputs]"
+                    )
+        except Exception:
+            logger.exception(
+                "Printing results failed"
+            )
+    def export_json(self):
+        try:
+            data=json.dumps(
+                [
+                    asdict(report)
+                    for report in self.results
+                    if isinstance(
+                        report,
+                        PageReport
+                    )
+                ],
+                indent=2
+            )
+            if self.output_file:
+                atomic_write(
+                    self.output_file,
+                    data
+                )
+                logger.info(
+                    "Saved JSON -> %s",
+                    self.output_file
+                )
+            else:
+                print(data)
+        except Exception:
+            logger.exception(
+                "JSON export failed"
+            )
+    def output(self):
+        try:
+            if self.output_mode=="json":
+                self.export_json()
+            else:
+                self.print_results()
+        except Exception:
+            logger.exception(
+                "Output generation failed"
+            )
+def load_urls(args):
+    urls=[]
+    try:
+        if args.file:
+            try:
+                urls.extend(
+                    [
+                        line.strip()
+                        for line in Path(args.file)
+                        .read_text(
+                            encoding="utf-8"
+                        )
+                        .splitlines()
+                        if line.strip()
+                    ]
+                )
+            except Exception:
+                logger.exception(
+                    "Failed reading URL file"
+                )
+        if args.urls:
+            try:
+                urls.extend(
+                    [
+                        item.strip()
+                        for item in args.urls.split(",")
+                        if item.strip()
+                    ]
+                )
+            except Exception:
+                logger.exception(
+                    "Failed parsing URL list"
+                )
+    except Exception:
+        logger.exception(
+            "URL loading failed"
         )
     return urls
 def main():
@@ -1160,7 +1354,13 @@ def main():
         action="store_true",
         help="Enable verbose logging"
     )
-    args=parser.parse_args()
+    try:
+        args=parser.parse_args()
+    except Exception:
+        logger.exception(
+            "Argument parsing failed"
+        )
+        return
     if args.version:
         print(
             "FormMap",
@@ -1176,28 +1376,45 @@ def main():
             "Provide --urls or --file"
         )
     urls=[
-        u
-        for u in load_urls(args)
-        if normalize_url(u)
+        normalized
+        for normalized in (
+            normalize_url(url)
+            for url in load_urls(args)
+        )
+        if normalized
     ]
+    urls=list(
+        dict.fromkeys(
+            urls
+        )
+    )
     if not urls:
         parser.error(
             "No valid URLs supplied"
         )
-    auditor=SiteAuditor(
-        urls=urls,
-        max_threads=args.threads,
-        output_mode=args.output,
-        output_file=args.out_file,
-        save_html=not args.no_save_html,
-        follow_internal_links=args.follow_internal_links
-    )
-    auditor.run()
-    auditor.output()
+    try:
+        auditor=SiteAuditor(
+            urls=urls,
+            max_threads=args.threads,
+            output_mode=args.output,
+            output_file=args.out_file,
+            save_html=not args.no_save_html,
+            follow_internal_links=args.follow_internal_links
+        )
+        auditor.run()
+        auditor.output()
+    except Exception:
+        logger.exception(
+            "Fatal auditor failure"
+        )
 if __name__=="__main__":
     try:
         main()
     except KeyboardInterrupt:
         logger.info(
             "Interrupted by user"
+        )
+    except Exception:
+        logger.exception(
+            "Unhandled fatal error"
         )
